@@ -69,7 +69,12 @@ const { segmentation: segmentationUtils } = cstUtils;
 
 const publicUrl = process.env.PUBLIC_URL || '/';
 const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
-ort.env.wasm.wasmPaths = ortWasmBasePath;
+const configureOnnxRuntime = () => {
+  ort.env.wasm.wasmPaths = ortWasmBasePath;
+  ort.env.wasm.numThreads = 1;
+};
+
+configureOnnxRuntime();
 
 const getLabelmapTools = ({ toolGroupService }) => {
   const labelmapTools = [];
@@ -116,6 +121,8 @@ const segmentAI = new ONNXSegmentationController({
   },
   modelName: 'sam_b',
 });
+segmentAI.getConfig().threads = 1;
+configureOnnxRuntime();
 let segmentAIEnabled = false;
 
 function commandsModule({
