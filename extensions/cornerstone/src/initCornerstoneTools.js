@@ -46,11 +46,31 @@ import {
   SplineContourSegmentationTool,
   LabelMapEditWithContourTool,
 } from '@cornerstonejs/tools';
-import { LabelmapSlicePropagationTool, MarkerLabelmapTool } from '@cornerstonejs/ai';
+import {
+  LabelmapSlicePropagationTool,
+  MarkerLabelmapTool,
+  ONNXSegmentationController,
+} from '@cornerstonejs/ai';
+import ort from 'onnxruntime-web/webgpu';
 import * as polySeg from '@cornerstonejs/polymorphic-segmentation';
 
 import CalibrationLineTool from './tools/CalibrationLineTool';
 import ImageOverlayViewerTool from './tools/ImageOverlayViewerTool';
+
+const publicUrl = process.env.PUBLIC_URL || '/';
+const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
+const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
+
+ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(modelName) {
+  const config = originalGetOnnxConfig.call(this, modelName);
+
+  config.threads = 1;
+  ort.env.wasm.wasmPaths = ortWasmBasePath;
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.proxy = config.provider === 'wasm';
+
+  return config;
+};
 
 export default function initCornerstoneTools(configuration = {}) {
   CrosshairsTool.isAnnotation = false;
