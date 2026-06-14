@@ -189,12 +189,21 @@ ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabe
     });
   }
 
-  this._autoSegmentMode = true;
+  this._autoSegmentMode = false;
   this.islandFillOptions = null;
 
   try {
     const result = originalCreateOnnxLabelmap.apply(this, args);
-    markerDebug('createLabelmap after');
+    const hasPreview = !!this.tool?._previewData?.preview;
+
+    if (hasPreview) {
+      this.tool.acceptPreview(this.viewport.element);
+    }
+
+    markerDebug('createLabelmap after', {
+      acceptedPreview: hasPreview,
+      hasPreviewAfterAccept: !!this.tool?._previewData?.preview,
+    });
     return result;
   } finally {
     this._autoSegmentMode = previousAutoSegmentMode;
