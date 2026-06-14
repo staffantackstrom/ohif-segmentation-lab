@@ -60,6 +60,7 @@ import ImageOverlayViewerTool from './tools/ImageOverlayViewerTool';
 const publicUrl = process.env.PUBLIC_URL || '/';
 const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
 const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
+const originalOnnxInitViewport = ONNXSegmentationController.prototype.initViewport;
 const originalCreateOnnxLabelmap = ONNXSegmentationController.prototype.createLabelmap;
 
 ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(modelName) {
@@ -71,6 +72,21 @@ ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(model
   ort.env.wasm.proxy = config.provider === 'wasm';
 
   return config;
+};
+
+ONNXSegmentationController.prototype.initViewport = function patchedInitViewport(viewport) {
+  originalOnnxInitViewport.call(this, viewport);
+
+  this.getPromptAnnotations = (annotationViewport = this.viewport) => {
+    const { element } = annotationViewport;
+    const annotations = [];
+
+    for (const annotationName of this.promptAnnotationTypes) {
+      annotations.push(...annotation.state.getAnnotations(annotationName, element));
+    }
+
+    return annotations;
+  };
 };
 
 ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabelmap(...args) {
