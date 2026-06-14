@@ -62,6 +62,17 @@ const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
 const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
 const originalOnnxInitViewport = ONNXSegmentationController.prototype.initViewport;
 const originalCreateOnnxLabelmap = ONNXSegmentationController.prototype.createLabelmap;
+const originalOnnxRunDecode = ONNXSegmentationController.prototype.runDecode;
+const originalOnnxUpdateAnnotations = ONNXSegmentationController.prototype.updateAnnotations;
+
+const isMarkerDebugEnabled = () =>
+  typeof window !== 'undefined' && window.localStorage?.debugMarkerLabelmap === 'true';
+
+const markerDebug = (...args) => {
+  if (isMarkerDebugEnabled()) {
+    console.debug('[MarkerLabelmapDebug]', ...args);
+  }
+};
 
 ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(modelName) {
   const config = originalGetOnnxConfig.call(this, modelName);
@@ -91,17 +102,100 @@ ONNXSegmentationController.prototype.initViewport = function patchedInitViewport
 
     return annotations;
   };
+
+  markerDebug('initViewport', {
+    reused: isSameViewport && !!this.tool,
+    viewportId: viewport.id,
+    imageId: this.desiredImage?.imageId,
+  });
+};
+
+ONNXSegmentationController.prototype.updateAnnotations = function patchedUpdateAnnotations(...args) {
+  if (isMarkerDebugEnabled()) {
+    const annotations = this.getPromptAnnotations();
+    markerDebug('updateAnnotations before', {
+      enabled: this._enabled,
+      autoSegmentMode: this._autoSegmentMode,
+      annotationsNeedUpdating: this.annotationsNeedUpdating,
+      annotationCount: annotations.length,
+      annotationTools: annotations.map(annotation => annotation.metadata?.toolName),
+      hasCurrentImage: !!this.currentImage,
+      hasCanvasPosition: !!this.currentImage?.canvasPosition,
+      hasImageEmbeddings: !!this.currentImage?.imageEmbeddings,
+      isGpuInUse: this.isGpuInUse,
+      desiredImageId: this.desiredImage?.imageId,
+      currentImageId: this.currentImage?.imageId,
+    });
+  }
+
+  const result = originalOnnxUpdateAnnotations.apply(this, args);
+
+  markerDebug('updateAnnotations after', {
+    points: this.points?.length ? [...this.points] : [],
+    labels: this.labels?.length ? [...this.labels] : [],
+    worldPointCount: this.worldPoints?.length ?? 0,
+  });
+
+  return result;
+};
+
+ONNXSegmentationController.prototype.runDecode = function patchedRunDecode(...args) {
+  markerDebug('runDecode', {
+    skippedByGpu: this.isGpuInUse,
+    hasCurrentImage: !!this.currentImage,
+    hasImageEmbeddings: !!this.currentImage?.imageEmbeddings,
+    pointCount: (this.points?.length ?? 0) / 2,
+    labels: this.labels?.length ? [...this.labels] : [],
+    desiredImageId: this.desiredImage?.imageId,
+    currentImageId: this.currentImage?.imageId,
+  });
+
+  return originalOnnxRunDecode.apply(this, args);
 };
 
 ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabelmap(...args) {
   const previousAutoSegmentMode = this._autoSegmentMode;
   const previousIslandFillOptions = this.islandFillOptions;
+  const [mask] = args;
+
+  if (isMarkerDebugEnabled()) {
+    const data = mask?.data || [];
+    let max = 0;
+    let nonZero = 0;
+    let aboveCutoff = 0;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const value = data[i];
+      if (value > 0) {
+        nonZero++;
+      }
+      if (value > this.pCutoff) {
+        aboveCutoff++;
+      }
+      if (value > max) {
+        max = value;
+      }
+    }
+
+    markerDebug('createLabelmap before', {
+      maskWidth: mask?.width,
+      maskHeight: mask?.height,
+      pCutoff: this.pCutoff,
+      maskMax: max,
+      maskNonZeroPixels: nonZero,
+      maskPixelsAboveCutoff: aboveCutoff,
+      hasTool: !!this.tool,
+      viewportId: this.viewport?.id,
+    });
+  }
 
   this._autoSegmentMode = true;
   this.islandFillOptions = null;
 
   try {
-    return originalCreateOnnxLabelmap.apply(this, args);
+    const result = originalCreateOnnxLabelmap.apply(this, args);
+    markerDebug('createLabelmap after');
+    return result;
   } finally {
     this._autoSegmentMode = previousAutoSegmentMode;
     this.islandFillOptions = previousIslandFillOptions;
