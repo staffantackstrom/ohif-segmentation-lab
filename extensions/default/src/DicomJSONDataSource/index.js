@@ -69,6 +69,9 @@ function createDicomJSONApi(dicomJsonConfig, servicesManager) {
       if (!url) {
         url = query.get('url');
       }
+      if (!url) {
+        return [];
+      }
       const evaluatedUrl = resolveConfigFetchPolicy(url, {
         allowedOrigins: dicomJsonConfig.dangerouslyAllowedOriginsForAuthenticatedEnvironments,
         userAuthenticationService,
