@@ -60,6 +60,7 @@ import ImageOverlayViewerTool from './tools/ImageOverlayViewerTool';
 const publicUrl = process.env.PUBLIC_URL || '/';
 const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
 const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
+const originalCreateOnnxLabelmap = ONNXSegmentationController.prototype.createLabelmap;
 
 ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(modelName) {
   const config = originalGetOnnxConfig.call(this, modelName);
@@ -70,6 +71,21 @@ ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(model
   ort.env.wasm.proxy = config.provider === 'wasm';
 
   return config;
+};
+
+ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabelmap(...args) {
+  const previousAutoSegmentMode = this._autoSegmentMode;
+  const previousIslandFillOptions = this.islandFillOptions;
+
+  this._autoSegmentMode = true;
+  this.islandFillOptions = null;
+
+  try {
+    return originalCreateOnnxLabelmap.apply(this, args);
+  } finally {
+    this._autoSegmentMode = previousAutoSegmentMode;
+    this.islandFillOptions = previousIslandFillOptions;
+  }
 };
 
 export default function initCornerstoneTools(configuration = {}) {
