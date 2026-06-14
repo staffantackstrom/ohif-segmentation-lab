@@ -75,7 +75,11 @@ ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(model
 };
 
 ONNXSegmentationController.prototype.initViewport = function patchedInitViewport(viewport) {
-  originalOnnxInitViewport.call(this, viewport);
+  const isSameViewport = this.viewport === viewport;
+
+  if (!isSameViewport || !this.tool) {
+    originalOnnxInitViewport.call(this, viewport);
+  }
 
   this.getPromptAnnotations = (annotationViewport = this.viewport) => {
     const { element } = annotationViewport;
