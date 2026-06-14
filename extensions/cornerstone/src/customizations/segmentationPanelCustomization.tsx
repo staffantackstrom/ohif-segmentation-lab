@@ -4,47 +4,20 @@ import SegmentationToolConfig from '../components/SegmentationToolConfig';
 import React from 'react';
 import { SegmentationRepresentations } from '@cornerstonejs/tools/enums';
 
-const DEFAULT_LABELMAP_SEGMENTS = {
-  1: {
-    label: 'Fistelgang vatska',
-    active: true,
-    color: [0, 255, 255, 255], // Cyan
-  },
-  2: {
-    label: 'Fistelgang vagg',
-    color: [255, 0, 0, 255], // Röd
-  },
-  3: {
-    label: 'Inre sfinkter',
-    color: [0, 120, 255, 255], // Blå
-  },
-  4: {
-    label: 'Yttre sfinkter',
-    color: [255, 215, 0, 255], // Gul
-  },
-  5: {
-    label: 'Abscess',
-    color: [255, 0, 255, 255], // Magenta
-  },
-  6: {
-    label: 'Seton',
-    color: [0, 255, 0, 255], // Grön
-  },
-  7: {
-    label: 'Puborektalis',
-    color: [255, 128, 0, 255], // Orange
-  },
-  8: {
-    label: 'Levator ani',
-    color: [128, 0, 255, 255], // Violett
-  },
-};
+function getDefaultLabelmapSegments(customizationService) {
+  return customizationService.getCustomization('segmentation.defaultLabelmapSegments') || {};
+}
 
-function applyDefaultLabelmapSegmentColors(segmentationService, segmentationId: string) {
+function applyDefaultLabelmapSegmentColors(
+  customizationService,
+  segmentationService,
+  segmentationId: string
+) {
+  const defaultLabelmapSegments = getDefaultLabelmapSegments(customizationService);
   const viewportIds = segmentationService.getViewportIdsWithSegmentation(segmentationId) || [];
 
   viewportIds.forEach(viewportId => {
-    Object.entries(DEFAULT_LABELMAP_SEGMENTS).forEach(([segmentIndex, segment]) => {
+    Object.entries(defaultLabelmapSegments).forEach(([segmentIndex, segment]) => {
       if (segment.color) {
         segmentationService.setSegmentColor(
           viewportId,
@@ -58,7 +31,7 @@ function applyDefaultLabelmapSegmentColors(segmentationService, segmentationId: 
 }
 
 export default function getSegmentationPanelCustomization({ commandsManager, servicesManager }) {
-  const { segmentationService } = servicesManager.services;
+  const { customizationService, segmentationService } = servicesManager.services;
 
   let contourRenderFillChangedGlobally = false;
   let isApplyingDefaultLabelmapSegmentColors = false;
@@ -88,7 +61,7 @@ export default function getSegmentationPanelCustomization({ commandsManager, ser
 
       isApplyingDefaultLabelmapSegmentColors = true;
       try {
-        applyDefaultLabelmapSegmentColors(segmentationService, segmentationId);
+        applyDefaultLabelmapSegmentColors(customizationService, segmentationService, segmentationId);
       } finally {
         isApplyingDefaultLabelmapSegmentColors = false;
       }
@@ -106,17 +79,18 @@ export default function getSegmentationPanelCustomization({ commandsManager, ser
       const { viewportGridService } = servicesManager.services;
       const viewportId = viewportGridService.getState().activeViewportId;
       if (segmentationRepresentationType === SegmentationRepresentations.Labelmap) {
+        const defaultLabelmapSegments = getDefaultLabelmapSegments(customizationService);
         const segmentationId = await commandsManager.run('createLabelmapForViewport', {
           viewportId,
           options: {
-            segments: DEFAULT_LABELMAP_SEGMENTS,
+            segments: defaultLabelmapSegments,
             isotropic: {
               spacing: [1, 1, 1],
             },
           },
         });
 
-        applyDefaultLabelmapSegmentColors(segmentationService, segmentationId);
+        applyDefaultLabelmapSegmentColors(customizationService, segmentationService, segmentationId);
       } else if (segmentationRepresentationType === SegmentationRepresentations.Contour) {
         const segmentationId = await commandsManager.run('createContourForViewport', {
           viewportId,
