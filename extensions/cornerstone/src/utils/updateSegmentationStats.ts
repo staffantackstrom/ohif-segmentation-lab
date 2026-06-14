@@ -1,4 +1,5 @@
 import * as cornerstoneTools from '@cornerstonejs/tools';
+import { cache } from '@cornerstonejs/core';
 import cloneDeep from 'lodash.clonedeep';
 
 interface BidirectionalAxis {
@@ -42,11 +43,25 @@ export async function updateSegmentationStats({
     return null;
   }
 
-  const stats = await cornerstoneTools.utilities.segmentation.getStatistics({
-    segmentationId,
-    segmentIndices,
-    mode: 'individual',
-  });
+  if (segmentation.cachedStats?.isIsotropicLabelmap) {
+    return updateIsotropicLabelmapStats({
+      segmentation,
+      segmentIndices,
+      readableText,
+    });
+  }
+
+  let stats;
+  try {
+    stats = await cornerstoneTools.utilities.segmentation.getStatistics({
+      segmentationId,
+      segmentIndices,
+      mode: 'individual',
+    });
+  } catch (error) {
+    console.warn('Unable to update segmentation statistics:', error);
+    return null;
+  }
 
   if (!stats) {
     return null;
@@ -108,6 +123,72 @@ export async function updateSegmentationStats({
       updatedSegmentation.segments[index].cachedStats.namedStats = namedStats;
       hasUpdates = true;
     }
+  });
+
+  return hasUpdates ? updatedSegmentation : null;
+}
+
+function updateIsotropicLabelmapStats({
+  segmentation,
+  segmentIndices,
+  readableText,
+}: {
+  segmentation: any;
+  segmentIndices: number[];
+  readableText: any;
+}) {
+  const volumeId = segmentation.representationData?.Labelmap?.volumeId;
+  const volume = volumeId ? cache.getVolume(volumeId) : null;
+  const scalarData =
+    volume?.voxelManager?.getCompleteScalarDataArray?.() || volume?.voxelManager?.getScalarData?.();
+
+  if (!volume || !scalarData) {
+    return null;
+  }
+
+  const updatedSegmentation = cloneDeep(segmentation);
+  const voxelVolume = volume.spacing.reduce((product, value) => product * value, 1);
+  let hasUpdates = false;
+
+  segmentIndices.forEach(segmentIndex => {
+    const segment = updatedSegmentation.segments[segmentIndex];
+
+    if (!segment) {
+      return;
+    }
+
+    let count = 0;
+    for (let voxelIndex = 0; voxelIndex < scalarData.length; voxelIndex++) {
+      if (scalarData[voxelIndex] === segmentIndex) {
+        count++;
+      }
+    }
+
+    segment.cachedStats ||= {};
+    const namedStats = segment.cachedStats.namedStats || {};
+
+    if (readableText.count) {
+      namedStats.count = {
+        name: 'count',
+        label: readableText.count,
+        value: count,
+        unit: null,
+        order: Object.keys(readableText).indexOf('count'),
+      };
+    }
+
+    if (readableText.volume) {
+      namedStats.volume = {
+        name: 'volume',
+        label: readableText.volume,
+        value: count * voxelVolume,
+        unit: 'mm3',
+        order: Object.keys(readableText).indexOf('volume'),
+      };
+    }
+
+    segment.cachedStats.namedStats = namedStats;
+    hasUpdates = true;
   });
 
   return hasUpdates ? updatedSegmentation : null;

@@ -1721,26 +1721,15 @@ function commandsModule({
     },
 
     /**
-     * Stores a segmentation and shows it in the viewport
+     * Stores a segmentation without replacing the active editable segmentation.
      * @param props.segmentationId - The ID of the segmentation to store
      */
     storeSegmentationCommand: async args => {
-      const { segmentationId } = args;
-      const { segmentationService, viewportGridService } = servicesManager.services;
-
-      const displaySetInstanceUIDs = await createReportAsync({
+      await createReportAsync({
         servicesManager,
         getReport: () => commandsManager.runCommand('storeSegmentation', args),
         reportType: 'Segmentation',
       });
-
-      if (displaySetInstanceUIDs) {
-        segmentationService.remove(segmentationId);
-        viewportGridService.setDisplaySetsForViewport({
-          viewportId: viewportGridService.getActiveViewportId(),
-          displaySetInstanceUIDs,
-        });
-      }
     },
 
     /**

@@ -13,7 +13,7 @@ const colorsByOrientation = {
 };
 
 function createTools({ utilityModule, commandsManager }) {
-  const { toolNames, Enums } = utilityModule.exports;
+  const { toolNames, Enums, fillInsideCircleWithSliceSlab } = utilityModule.exports;
 
   const tools = {
     active: [
@@ -33,6 +33,9 @@ function createTools({ utilityModule, commandsManager }) {
         toolName: 'CircularBrush',
         parentTool: 'Brush',
         configuration: {
+          strategies: {
+            FILL_INSIDE_CIRCLE: fillInsideCircleWithSliceSlab,
+          },
           activeStrategy: 'FILL_INSIDE_CIRCLE',
           minRadius: MIN_SEGMENTATION_DRAWING_RADIUS,
           maxRadius: MAX_SEGMENTATION_DRAWING_RADIUS,
@@ -198,6 +201,12 @@ function initMPRToolGroup(extensionManager, toolGroupService, commandsManager) {
   tools.disabled.push(
     {
       toolName: utilityModule.exports.toolNames.Crosshairs,
+      bindings: [
+        {
+          mouseButton: utilityModule.exports.Enums.MouseBindings.Primary,
+          modifierKey: utilityModule.exports.Enums.KeyboardBindings.Shift,
+        },
+      ],
       configuration: {
         viewportIndicators: true,
         viewportIndicatorsConfig: {

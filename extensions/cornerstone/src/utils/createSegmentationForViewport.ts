@@ -19,6 +19,10 @@ type CreateSegmentationForViewportOptions = {
   label?: string;
   segmentationId?: string;
   createInitialSegment?: boolean;
+  segments?: Record<number, Record<string, unknown>>;
+  isotropic?: {
+    spacing?: [number, number, number];
+  };
 };
 
 type CreateSegmentationForViewportParams = {
@@ -56,7 +60,8 @@ export async function createSegmentationForViewport(
   const segmentationCreationOptions = {
     label,
     segmentationId,
-    segments: _createDefaultSegments(options.createInitialSegment),
+    segments: options.segments || _createDefaultSegments(options.createInitialSegment),
+    isotropic: options.isotropic,
   };
 
   // This will create the segmentation and register it as a display set

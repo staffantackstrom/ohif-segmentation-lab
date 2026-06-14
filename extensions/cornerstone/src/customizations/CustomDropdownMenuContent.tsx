@@ -64,6 +64,20 @@ export const CustomDropdownMenuContent = () => {
         context: 'CORNERSTONE',
       });
     },
+    downloadSegmentation: segmentationId => {
+      commandsManager.run({
+        commandName: 'downloadSegmentation',
+        commandOptions: { segmentationId },
+        context: 'SEGMENTATION',
+      });
+    },
+    downloadRTSS: segmentationId => {
+      commandsManager.run({
+        commandName: 'downloadRTSS',
+        commandOptions: { segmentationId },
+        context: 'SEGMENTATION',
+      });
+    },
     downloadCSVSegmentationReport: segmentationId => {
       commandsManager.run('downloadCSVSegmentationReport', { segmentationId });
     },

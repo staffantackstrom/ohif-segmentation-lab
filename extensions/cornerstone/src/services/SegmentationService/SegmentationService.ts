@@ -5,6 +5,7 @@ import {
   geometryLoader,
   getEnabledElementByViewportId,
   imageLoader,
+  volumeLoader,
   Types as csTypes,
   utilities as csUtils,
   metaData,
@@ -28,6 +29,7 @@ import { EasingFunctionEnum, EasingFunctionMap } from '../../utils/transitions';
 import { ViewReference } from '@cornerstonejs/core/types';
 
 const { DefaultHistoryMemo } = csUtils.HistoryMemo;
+const { uuidv4 } = csUtils;
 
 const {
   Labelmap: LABELMAP,
@@ -307,6 +309,11 @@ class SegmentationService extends PubSubService {
       return;
     }
 
+    if (!segmentation) {
+      console.warn(`Segmentation with id ${segmentationId} not found.`);
+      return;
+    }
+
     const colorLUTIndex = this._segmentationIdToColorLUTIndexMap.get(segmentationId);
 
     let isConverted = false;
@@ -363,6 +370,9 @@ class SegmentationService extends PubSubService {
       segments?: { [segmentIndex: number]: Partial<cstTypes.Segment> };
       FrameOfReferenceUID?: string;
       label?: string;
+      isotropic?: {
+        spacing?: csTypes.Point3;
+      };
     }
   ): Promise<string> {
     return this._createSegmentationForDisplaySet(displaySet, LABELMAP, options);
@@ -375,6 +385,9 @@ class SegmentationService extends PubSubService {
       segments?: { [segmentIndex: number]: Partial<cstTypes.Segment> };
       FrameOfReferenceUID?: string;
       label?: string;
+      isotropic?: {
+        spacing?: csTypes.Point3;
+      };
     }
   ): Promise<string> {
     return this._createSegmentationForDisplaySet(displaySet, CONTOUR, options);
@@ -390,12 +403,15 @@ class SegmentationService extends PubSubService {
    */
   private async _createSegmentationForDisplaySet(
     displaySet: AppTypes.DisplaySet,
-    segmentationType: SegmentationRepresentations,
+    segmentationType: csToolsEnums.SegmentationRepresentations,
     options?: {
       segmentationId?: string;
       segments?: { [segmentIndex: number]: Partial<cstTypes.Segment> };
       FrameOfReferenceUID?: string;
       label?: string;
+      isotropic?: {
+        spacing?: csTypes.Point3;
+      };
     }
   ): Promise<string> {
     // Todo: random does not makes sense, make this better, like
@@ -412,10 +428,19 @@ class SegmentationService extends PubSubService {
       referenceImageIds = middleTimePoint;
     }
 
-    const derivedImages = await imageLoader.createAndCacheDerivedLabelmapImages(referenceImageIds);
-
     const segs = this.getSegmentations();
     const label = options?.label || `Segmentation ${segs.length + 1}`;
+
+    if (segmentationType === LABELMAP && options?.isotropic) {
+      return this._createIsotropicLabelmapSegmentationForDisplaySet(displaySet, {
+        segmentationId,
+        segments: options.segments,
+        label,
+        spacing: options.isotropic.spacing || [1, 1, 1],
+      });
+    }
+
+    const derivedImages = await imageLoader.createAndCacheDerivedLabelmapImages(referenceImageIds);
 
     const segImageIds = derivedImages.map(image => image.imageId);
 
@@ -449,6 +474,185 @@ class SegmentationService extends PubSubService {
 
     this.addOrUpdateSegmentation(segmentationPublicInput);
     return segmentationId;
+  }
+
+  private async _createIsotropicLabelmapSegmentationForDisplaySet(
+    displaySet: AppTypes.DisplaySet,
+    {
+      segmentationId,
+      segments,
+      label,
+      spacing,
+    }: {
+      segmentationId: string;
+      segments?: { [segmentIndex: number]: Partial<cstTypes.Segment> };
+      label: string;
+      spacing: csTypes.Point3;
+    }
+  ): Promise<string> {
+    const geometry = this._getIsotropicLabelmapGeometry(displaySet, spacing);
+    const volumeId = `localLabelmap:${segmentationId}:${uuidv4()}`;
+
+    const labelmapVolume = volumeLoader.createLocalLabelmapVolume(
+      {
+        metadata: {
+          FrameOfReferenceUID: geometry.FrameOfReferenceUID,
+          Modality: 'SEG',
+        },
+        dimensions: geometry.dimensions,
+        spacing: geometry.spacing,
+        origin: geometry.origin,
+        direction: geometry.direction,
+        referencedImageIds: geometry.referencedImageIds,
+        targetBuffer: {
+          type: 'Uint8Array',
+        },
+      },
+      volumeId
+    );
+
+    labelmapVolume.referencedImageIds = geometry.referencedImageIds;
+
+    const segmentationPublicInput: cstTypes.SegmentationPublicInput = {
+      segmentationId,
+      representation: {
+        type: LABELMAP,
+        data: {
+          volumeId,
+          referencedImageIds: geometry.referencedImageIds,
+        },
+      },
+      config: {
+        label,
+        fallbackLabel: `1 mm labelmap: ${displaySet.StudyInstanceUID}`,
+        segments:
+          segments && Object.keys(segments).length > 0
+            ? segments
+            : {
+                1: {
+                  label: `${i18n.t('Segment')} 1`,
+                  active: true,
+                },
+              },
+        cachedStats: {
+          isIsotropicLabelmap: true,
+          info: `Isotropic ${spacing.join(' x ')} mm labelmap`,
+          dimensions: geometry.dimensions,
+          origin: geometry.origin,
+          spacing: geometry.spacing,
+        },
+      },
+    };
+
+    this.addOrUpdateSegmentation(segmentationPublicInput);
+    return segmentationId;
+  }
+
+  private _getIsotropicLabelmapGeometry(displaySet: AppTypes.DisplaySet, spacing: csTypes.Point3) {
+    const { displaySetService } = this.servicesManager.services;
+    const studyDisplaySets = displaySetService
+      .getActiveDisplaySets()
+      .filter(
+        candidateDisplaySet =>
+          candidateDisplaySet.StudyInstanceUID === displaySet.StudyInstanceUID &&
+          !candidateDisplaySet.isOverlayDisplaySet &&
+          candidateDisplaySet.instances?.length
+      );
+
+    const displaySetsToUse = studyDisplaySets.length ? studyDisplaySets : [displaySet];
+    const referencedImageIds: string[] = [];
+    const min: csTypes.Point3 = [Infinity, Infinity, Infinity];
+    const max: csTypes.Point3 = [-Infinity, -Infinity, -Infinity];
+    let FrameOfReferenceUID = displaySet.FrameOfReferenceUID;
+
+    for (const candidateDisplaySet of displaySetsToUse) {
+      for (const instance of candidateDisplaySet.instances || []) {
+        const corners = this._getImagePlaneCorners(instance);
+
+        if (!corners) {
+          continue;
+        }
+
+        FrameOfReferenceUID ||= instance.FrameOfReferenceUID;
+
+        if (instance.imageId) {
+          referencedImageIds.push(instance.imageId);
+        }
+
+        for (const corner of corners) {
+          for (let axis = 0; axis < 3; axis++) {
+            min[axis] = Math.min(min[axis], corner[axis]);
+            max[axis] = Math.max(max[axis], corner[axis]);
+          }
+        }
+      }
+    }
+
+    if (!Number.isFinite(min[0])) {
+      throw new Error('Cannot create isotropic labelmap: no image plane geometry was available.');
+    }
+
+    const marginMm = Math.max(...spacing, 1) * 2;
+    for (let axis = 0; axis < 3; axis++) {
+      min[axis] -= marginMm;
+      max[axis] += marginMm;
+    }
+
+    const dimensions = spacing.map((axisSpacing, axis) =>
+      Math.max(1, Math.ceil((max[axis] - min[axis]) / axisSpacing) + 1)
+    ) as csTypes.Point3;
+
+    return {
+      FrameOfReferenceUID,
+      dimensions,
+      spacing,
+      origin: min,
+      direction: [1, 0, 0, 0, 1, 0, 0, 0, 1] as csTypes.Mat3,
+      referencedImageIds: Array.from(new Set(referencedImageIds)),
+    };
+  }
+
+  private _getImagePlaneCorners(instance): csTypes.Point3[] | undefined {
+    const imageOrientationPatient = instance.ImageOrientationPatient?.map(Number);
+    const imagePositionPatient = instance.ImagePositionPatient?.map(Number);
+    const pixelSpacing = instance.PixelSpacing?.map(Number);
+    const rows = Number(instance.Rows);
+    const columns = Number(instance.Columns);
+
+    if (
+      !imageOrientationPatient ||
+      imageOrientationPatient.length !== 6 ||
+      !imagePositionPatient ||
+      imagePositionPatient.length !== 3 ||
+      !pixelSpacing ||
+      pixelSpacing.length < 2 ||
+      !Number.isFinite(rows) ||
+      !Number.isFinite(columns)
+    ) {
+      return;
+    }
+
+    const rowCosines = imageOrientationPatient.slice(0, 3);
+    const columnCosines = imageOrientationPatient.slice(3, 6);
+    const rowPixelSpacing = pixelSpacing[0];
+    const columnPixelSpacing = pixelSpacing[1];
+    const rowExtent = Math.max(rows - 1, 0) * rowPixelSpacing;
+    const columnExtent = Math.max(columns - 1, 0) * columnPixelSpacing;
+
+    const point = (rowDistance: number, columnDistance: number): csTypes.Point3 =>
+      [0, 1, 2].map(
+        axis =>
+          imagePositionPatient[axis] +
+          columnCosines[axis] * rowDistance +
+          rowCosines[axis] * columnDistance
+      ) as csTypes.Point3;
+
+    return [
+      point(0, 0),
+      point(rowExtent, 0),
+      point(0, columnExtent),
+      point(rowExtent, columnExtent),
+    ];
   }
 
   public async createSegmentationForSEGDisplaySet(
@@ -1593,7 +1797,7 @@ class SegmentationService extends PubSubService {
   private determineViewportAndSegmentationType(csViewport, segmentation) {
     const isVolumeViewport =
       csViewport.type === ViewportType.ORTHOGRAPHIC || csViewport.type === ViewportType.VOLUME_3D;
-    const isVolumeSegmentation = 'volumeId' in segmentation.representationData[LABELMAP];
+    const isVolumeSegmentation = 'volumeId' in (segmentation.representationData?.[LABELMAP] ?? {});
     return { isVolumeViewport, isVolumeSegmentation };
   }
 

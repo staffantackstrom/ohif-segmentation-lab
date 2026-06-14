@@ -61,6 +61,7 @@ import { useMeasurementTracking } from './hooks/useMeasurementTracking';
 import { setUpSegmentationEventHandlers } from './utils/setUpSegmentationEventHandlers';
 import { setUpAnnotationEventHandlers } from './utils/setUpAnnotationEventHandlers';
 import update from 'immutability-helper';
+import { fillInsideCircleWithSliceSlab } from './utils/createSlabBrushStrategy';
 export * from './components';
 
 const { imageRetrieveMetadataProvider } = cornerstone.utilities;
@@ -254,6 +255,7 @@ const cornerstoneExtension: Types.Extensions.Extension = {
         exports: {
           toolNames,
           Enums: cs3DToolsEnums,
+          fillInsideCircleWithSliceSlab,
         },
       },
       {

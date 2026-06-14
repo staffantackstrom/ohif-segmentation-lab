@@ -1,5 +1,6 @@
 import { DicomMetadataStore, IWebApiDataSource } from '@ohif/core';
 import OHIF from '@ohif/core';
+import dcmjs from 'dcmjs';
 import qs from 'query-string';
 
 import getImageId from '../DicomWebDataSource/utils/getImageId';
@@ -15,6 +16,7 @@ const mappings = {
 
 let _store = {
   urls: [],
+  activeUrl: undefined,
   studyInstanceUIDMap: new Map(), // map of urls to array of study instance UIDs
   // {
   //   url: url1
@@ -83,6 +85,7 @@ function createDicomJSONApi(dicomJsonConfig, servicesManager) {
       }
 
       const data = await fetchConfigJson(evaluatedUrl);
+      _store.activeUrl = evaluatedUrl.normalizedUrl;
 
       let StudyInstanceUID;
       let SeriesInstanceUID;
@@ -113,6 +116,7 @@ function createDicomJSONApi(dicomJsonConfig, servicesManager) {
         url: evaluatedUrl.normalizedUrl,
         studies: [...data.studies],
       });
+      _store.activeUrl = evaluatedUrl.normalizedUrl;
       _store.studyInstanceUIDMap.set(
         evaluatedUrl.normalizedUrl,
         data.studies.map(study => study.StudyInstanceUID)
@@ -253,8 +257,33 @@ function createDicomJSONApi(dicomJsonConfig, servicesManager) {
       },
     },
     store: {
-      dicom: () => {
-        console.warn(' DICOMJson store dicom not implemented');
+      dicom: async dicom => {
+        const sourceUrl =
+          _store.urls.find(metaData =>
+            metaData.studies.some(study => study.StudyInstanceUID === dicom.StudyInstanceUID)
+          )?.url || _store.activeUrl;
+
+        if (!sourceUrl) {
+          throw new Error('No DICOM JSON url is active for storing DICOM');
+        }
+
+        const source = new URL(sourceUrl, window.location.href);
+        const storeUrl = new URL('/store/dicomjson', source.origin);
+        storeUrl.searchParams.set('url', source.href);
+
+        const response = await fetch(storeUrl.href, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/dicom',
+          },
+          body: dcmjs.data.datasetToBlob(dicom),
+        });
+
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        return response.json();
       },
     },
     reject: {},

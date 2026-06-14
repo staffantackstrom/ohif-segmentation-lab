@@ -784,7 +784,6 @@ const commandsModule = ({
       if (dataSource === 'download') {
         return async dicom => {
           const instances = Array.isArray(dicom) ? dicom : [dicom];
-          DicomMetadataStore.addInstances(instances, true);
           if (instances.length !== 1) {
             throw new Error('Download only supports a single DICOM instance');
           }
@@ -796,7 +795,6 @@ const commandsModule = ({
       if (dataSource === 'copyToClipboard') {
         return async dicom => {
           const instances = Array.isArray(dicom) ? dicom : [dicom];
-          DicomMetadataStore.addInstances(instances, true);
           if (instances.length !== 1) {
             throw new Error('Copy to clipboard only supports a single DICOM instance');
           }

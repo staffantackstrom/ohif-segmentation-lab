@@ -11,6 +11,7 @@ async function createReportAsync({
   const { displaySetService, uiNotificationService, uiDialogService } = servicesManager.services;
 
   try {
+    const previousDisplaySet = displaySetService.getMostRecentDisplaySet();
     const naturalizedReport = await getReport();
 
     if (!naturalizedReport) {
@@ -20,6 +21,16 @@ async function createReportAsync({
     // addInstances is called by the store command (storeMeasurements/storeSegmentation),
     // so the display set should already exist at this point.
     const displaySet = displaySetService.getMostRecentDisplaySet();
+
+    if (!displaySet || displaySet === previousDisplaySet) {
+      uiNotificationService.show({
+        title: 'Create Report',
+        message: successMessage ?? `${reportType} saved successfully`,
+        type: 'success',
+      });
+
+      return;
+    }
 
     const displaySetInstanceUID = displaySet.displaySetInstanceUID;
 

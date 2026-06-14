@@ -1,6 +1,6 @@
 import dcmjs from 'dcmjs';
 import { classes, Types, utils } from '@ohif/core';
-import { cache, metaData } from '@cornerstonejs/core';
+import { cache, metaData, utilities as csUtilities } from '@cornerstonejs/core';
 import { segmentation as cornerstoneToolsSegmentation } from '@cornerstonejs/tools';
 import { adaptersRT, adaptersSEG } from '@cornerstonejs/adapters';
 import { createReportDialogPrompt, useUIStateStore } from '@ohif/extension-default';
@@ -27,6 +27,273 @@ const {
     RTSS: { generateRTSSFromRepresentation },
   },
 } = adaptersRT;
+
+const { genericMetadataProvider } = csUtilities;
+const { DicomMetaDictionary } = dcmjs.data;
+
+const MR_IMAGE_STORAGE_SOP_CLASS_UID = '1.2.840.10008.5.1.4.1.1.4';
+
+function getSourceImageIdForSegmentation(segmentation) {
+  const labelmapData = segmentation.representationData?.Labelmap;
+  const volume = labelmapData?.volumeId ? cache.getVolume(labelmapData.volumeId) : null;
+
+  return (
+    labelmapData?.referencedImageIds?.[0] ||
+    volume?.referencedImageIds?.[0] ||
+    segmentation.predecessorImageId
+  );
+}
+
+function addSyntheticReferenceMetadata({
+  imageId,
+  sourceImageId,
+  studyInstanceUID,
+  seriesInstanceUID,
+  frameOfReferenceUID,
+  sopInstanceUID,
+  instanceNumber,
+  rows,
+  columns,
+  origin,
+  spacing,
+}) {
+  const sourceGeneralStudy = metaData.get('generalStudyModule', sourceImageId) || {};
+  const sourcePatientStudy = metaData.get('patientStudyModule', sourceImageId) || {};
+  const sourcePatient = metaData.get('patientModule', sourceImageId) || {};
+
+  genericMetadataProvider.add(imageId, {
+    type: 'generalStudyModule',
+    metadata: {
+      ...sourceGeneralStudy,
+      studyInstanceUID,
+    },
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'patientStudyModule',
+    metadata: sourcePatientStudy,
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'patientModule',
+    metadata: sourcePatient,
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'generalSeriesModule',
+    metadata: {
+      modality: 'MR',
+      seriesInstanceUID,
+      studyInstanceUID,
+      seriesNumber: 50000,
+      seriesDescription: 'Isotropic segmentation reference',
+    },
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'generalImageModule',
+    metadata: {
+      instanceNumber,
+      sopInstanceUID,
+    },
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'sopCommonModule',
+    metadata: {
+      sopClassUID: MR_IMAGE_STORAGE_SOP_CLASS_UID,
+      sopInstanceUID,
+    },
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'imagePlaneModule',
+    metadata: {
+      frameOfReferenceUID,
+      rows,
+      columns,
+      imageOrientationPatient: [1, 0, 0, 0, 1, 0],
+      rowCosines: [1, 0, 0],
+      columnCosines: [0, 1, 0],
+      imagePositionPatient: origin,
+      pixelSpacing: [spacing[1], spacing[0]],
+      rowPixelSpacing: spacing[1],
+      columnPixelSpacing: spacing[0],
+      usingDefaultValues: false,
+    },
+  });
+  genericMetadataProvider.add(imageId, {
+    type: 'imagePixelModule',
+    metadata: {
+      rows,
+      columns,
+      samplesPerPixel: 1,
+      photometricInterpretation: 'MONOCHROME2',
+      bitsAllocated: 16,
+      bitsStored: 16,
+      highBit: 15,
+      pixelRepresentation: 0,
+    },
+  });
+}
+
+function createSyntheticReferenceImagesForIsotropicLabelmap(segmentation) {
+  const labelmapData = segmentation.representationData?.Labelmap;
+  const volume = labelmapData?.volumeId ? cache.getVolume(labelmapData.volumeId) : null;
+  const sourceImageId = getSourceImageIdForSegmentation(segmentation);
+
+  if (!volume || !sourceImageId) {
+    throw new Error('Unable to export isotropic segmentation: missing volume or source image.');
+  }
+
+  const [columns, rows, slices] = volume.dimensions;
+  const [columnSpacing, rowSpacing, sliceSpacing] = volume.spacing;
+  const [originX, originY, originZ] = volume.origin;
+  const sourceInstance = metaData.get('instance', sourceImageId) || {};
+  const studyInstanceUID =
+    sourceInstance.StudyInstanceUID ||
+    metaData.get('generalStudyModule', sourceImageId)?.studyInstanceUID ||
+    DicomMetaDictionary.uid();
+  const frameOfReferenceUID =
+    sourceInstance.FrameOfReferenceUID || volume.metadata?.FrameOfReferenceUID || DicomMetaDictionary.uid();
+  const seriesInstanceUID = DicomMetaDictionary.uid();
+  const sliceLength = rows * columns;
+
+  return Array.from({ length: slices }, (_, sliceIndex) => {
+    const imageId = `isotropic-seg-ref:${segmentation.segmentationId}:${sliceIndex}`;
+    const sopInstanceUID = DicomMetaDictionary.uid();
+    const imagePositionPatient = [
+      originX,
+      originY,
+      originZ + sliceIndex * sliceSpacing,
+    ];
+
+    addSyntheticReferenceMetadata({
+      imageId,
+      sourceImageId,
+      studyInstanceUID,
+      seriesInstanceUID,
+      frameOfReferenceUID,
+      sopInstanceUID,
+      instanceNumber: sliceIndex + 1,
+      rows,
+      columns,
+      origin: imagePositionPatient,
+      spacing: [columnSpacing, rowSpacing, sliceSpacing],
+    });
+
+    return {
+      imageId,
+      rows,
+      columns,
+      height: rows,
+      width: columns,
+      voxelManager: {
+        getScalarData: () => new Uint16Array(sliceLength),
+      },
+    };
+  });
+}
+
+function createLabelmap3DFromSegmentation({ segmentation, segmentationService }) {
+  const { imageIds, volumeId } = segmentation.representationData.Labelmap;
+  const volume = volumeId ? cache.getVolume(volumeId) : null;
+  const segImages = volume ? null : imageIds.map(imageId => cache.getImage(imageId));
+  const dimensions = volume?.dimensions;
+  const scalarData = volume
+    ? volume.voxelManager.getCompleteScalarDataArray?.() || volume.voxelManager.getScalarData()
+    : null;
+  const labelmaps2D = [];
+  const allSegmentsOnLabelmap = [];
+
+  if (volume && scalarData) {
+    const [columns, rows, slices] = dimensions;
+    const sliceLength = rows * columns;
+
+    for (let z = 0; z < slices; z++) {
+      const pixelData = scalarData.subarray(z * sliceLength, (z + 1) * sliceLength);
+      const segmentsOnLabelmap = Array.from(new Set(pixelData.filter(segment => segment !== 0)));
+
+      if (!segmentsOnLabelmap.length) {
+        continue;
+      }
+
+      allSegmentsOnLabelmap.push(segmentsOnLabelmap);
+      labelmaps2D[z] = {
+        segmentsOnLabelmap,
+        pixelData,
+        rows,
+        columns,
+      };
+    }
+  } else {
+    let z = 0;
+
+    for (const segImage of segImages) {
+      const segmentsOnLabelmap = new Set();
+      const pixelData = segImage.getPixelData();
+      const { rows, columns } = segImage;
+
+      for (let i = 0; i < pixelData.length; i++) {
+        const segment = pixelData[i];
+        if (segment !== 0) {
+          segmentsOnLabelmap.add(segment);
+        }
+      }
+
+      allSegmentsOnLabelmap.push(Array.from(segmentsOnLabelmap));
+      labelmaps2D[z++] = {
+        segmentsOnLabelmap: Array.from(segmentsOnLabelmap),
+        pixelData,
+        rows,
+        columns,
+      };
+    }
+  }
+
+  const labelmap3D = {
+    segmentsOnLabelmap: Array.from(new Set(allSegmentsOnLabelmap.flat())),
+    metadata: [],
+    labelmaps2D,
+  };
+
+  const representations = segmentationService.getRepresentationsForSegmentation(
+    segmentation.segmentationId
+  );
+  const firstRepresentation = representations[0];
+
+  Object.entries(segmentation.segments).forEach(([segmentIndex, segment]) => {
+    if (!segment) {
+      return;
+    }
+
+    const color = firstRepresentation
+      ? segmentationService.getSegmentColor(
+          firstRepresentation.viewportId,
+          segmentation.segmentationId,
+          segment.segmentIndex
+        )
+      : [255, 0, 0, 255];
+
+    const RecommendedDisplayCIELabValue = dcmjs.data.Colors.rgb2DICOMLAB(
+      color.slice(0, 3).map(value => value / 255)
+    ).map(value => Math.round(value));
+
+    labelmap3D.metadata[segmentIndex] = {
+      SegmentNumber: segmentIndex.toString(),
+      SegmentLabel: segment.label,
+      SegmentAlgorithmType: segment?.algorithmType || 'MANUAL',
+      SegmentAlgorithmName: segment?.algorithmName || 'OHIF Brush',
+      RecommendedDisplayCIELabValue,
+      SegmentedPropertyCategoryCodeSequence: {
+        CodeValue: 'T-D0050',
+        CodingSchemeDesignator: 'SRT',
+        CodeMeaning: 'Tissue',
+      },
+      SegmentedPropertyTypeCodeSequence: {
+        CodeValue: 'T-D0050',
+        CodingSchemeDesignator: 'SRT',
+        CodeMeaning: 'Tissue',
+      },
+    };
+  });
+
+  return labelmap3D;
+}
 
 
 const commandsModule = ({
@@ -90,6 +357,19 @@ const commandsModule = ({
     generateSegmentation: ({ segmentationId, options = {} }) => {
       const segmentation = cornerstoneToolsSegmentation.state.getSegmentation(segmentationId);
       const predecessorImageId = options.predecessorImageId ?? segmentation.predecessorImageId;
+
+      if (segmentation.cachedStats?.isIsotropicLabelmap) {
+        const referencedImages = createSyntheticReferenceImagesForIsotropicLabelmap(segmentation);
+        const labelmap3D = createLabelmap3DFromSegmentation({
+          segmentation,
+          segmentationService,
+        });
+
+        return generateSegmentation(referencedImages, labelmap3D, metaData, {
+          predecessorImageId,
+          ...options,
+        });
+      }
 
       const { imageIds } = segmentation.representationData.Labelmap;
 

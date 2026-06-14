@@ -4,10 +4,64 @@ import SegmentationToolConfig from '../components/SegmentationToolConfig';
 import React from 'react';
 import { SegmentationRepresentations } from '@cornerstonejs/tools/enums';
 
+const DEFAULT_LABELMAP_SEGMENTS = {
+  1: {
+    label: 'Fistelgang vatska',
+    active: true,
+    color: [0, 255, 255, 255], // Cyan
+  },
+  2: {
+    label: 'Fistelgang vagg',
+    color: [255, 0, 0, 255], // Röd
+  },
+  3: {
+    label: 'Inre sfinkter',
+    color: [0, 120, 255, 255], // Blå
+  },
+  4: {
+    label: 'Yttre sfinkter',
+    color: [255, 215, 0, 255], // Gul
+  },
+  5: {
+    label: 'Abscess',
+    color: [255, 0, 255, 255], // Magenta
+  },
+  6: {
+    label: 'Seton',
+    color: [0, 255, 0, 255], // Grön
+  },
+  7: {
+    label: 'Puborektalis',
+    color: [255, 128, 0, 255], // Orange
+  },
+  8: {
+    label: 'Levator ani',
+    color: [128, 0, 255, 255], // Violett
+  },
+};
+
+function applyDefaultLabelmapSegmentColors(segmentationService, segmentationId: string) {
+  const viewportIds = segmentationService.getViewportIdsWithSegmentation(segmentationId) || [];
+
+  viewportIds.forEach(viewportId => {
+    Object.entries(DEFAULT_LABELMAP_SEGMENTS).forEach(([segmentIndex, segment]) => {
+      if (segment.color) {
+        segmentationService.setSegmentColor(
+          viewportId,
+          segmentationId,
+          Number(segmentIndex),
+          segment.color
+        );
+      }
+    });
+  });
+}
+
 export default function getSegmentationPanelCustomization({ commandsManager, servicesManager }) {
   const { segmentationService } = servicesManager.services;
 
   let contourRenderFillChangedGlobally = false;
+  let isApplyingDefaultLabelmapSegmentColors = false;
 
   // Listen to when the global CONTOUR type renderFill style property is changed.
   const { unsubscribe } = segmentationService.subscribe(
@@ -25,6 +79,22 @@ export default function getSegmentationPanelCustomization({ commandsManager, ser
     }
   );
 
+  segmentationService.subscribe(
+    segmentationService.EVENTS.SEGMENTATION_REPRESENTATION_MODIFIED,
+    ({ segmentationId }) => {
+      if (isApplyingDefaultLabelmapSegmentColors) {
+        return;
+      }
+
+      isApplyingDefaultLabelmapSegmentColors = true;
+      try {
+        applyDefaultLabelmapSegmentColors(segmentationService, segmentationId);
+      } finally {
+        isApplyingDefaultLabelmapSegmentColors = false;
+      }
+    }
+  );
+
   return {
     'panelSegmentation.customDropdownMenuContent': CustomDropdownMenuContent,
     'panelSegmentation.customSegmentStatisticsHeader': CustomSegmentStatisticsHeader,
@@ -36,7 +106,17 @@ export default function getSegmentationPanelCustomization({ commandsManager, ser
       const { viewportGridService } = servicesManager.services;
       const viewportId = viewportGridService.getState().activeViewportId;
       if (segmentationRepresentationType === SegmentationRepresentations.Labelmap) {
-        commandsManager.run('createLabelmapForViewport', { viewportId });
+        const segmentationId = await commandsManager.run('createLabelmapForViewport', {
+          viewportId,
+          options: {
+            segments: DEFAULT_LABELMAP_SEGMENTS,
+            isotropic: {
+              spacing: [1, 1, 1],
+            },
+          },
+        });
+
+        applyDefaultLabelmapSegmentColors(segmentationService, segmentationId);
       } else if (segmentationRepresentationType === SegmentationRepresentations.Contour) {
         const segmentationId = await commandsManager.run('createContourForViewport', {
           viewportId,

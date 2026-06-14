@@ -17,6 +17,8 @@ interface ExportSegmentationSubMenuItemProps {
   allowExport: boolean;
   actions: {
     storeSegmentation: (segmentationId: string, modality?: string) => Promise<unknown>;
+    downloadSegmentation: (segmentationId: string) => void;
+    downloadRTSS: (segmentationId: string) => void;
     downloadCSVSegmentationReport: (segmentationId: string) => void;
   };
 }
@@ -52,11 +54,31 @@ export const ExportSegmentationSubMenuItem: React.FC<ExportSegmentationSubMenuIt
             <DropdownMenuItem
               onClick={e => {
                 e.preventDefault();
+                actions.downloadSegmentation(segmentationId);
+              }}
+              disabled={!allowExport}
+            >
+              {t('Download DICOM SEG')}
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem
+            onClick={e => {
+              e.preventDefault();
+              actions.downloadRTSS(segmentationId);
+            }}
+            disabled={!allowExport}
+          >
+            {t('Download DICOM RTSS')}
+          </DropdownMenuItem>
+          {segmentationRepresentationType === SegmentationRepresentations.Labelmap && (
+            <DropdownMenuItem
+              onClick={e => {
+                e.preventDefault();
                 actions.storeSegmentation(segmentationId, 'SEG');
               }}
               disabled={!allowExport}
             >
-              {t('DICOM SEG')}
+              {t('Export DICOM SEG')}
             </DropdownMenuItem>
           )}
           <DropdownMenuItem
@@ -66,7 +88,7 @@ export const ExportSegmentationSubMenuItem: React.FC<ExportSegmentationSubMenuIt
             }}
             disabled={!allowExport}
           >
-            {t('DICOM RTSS')}
+            {t('Export DICOM RTSS')}
           </DropdownMenuItem>
         </DropdownMenuSubContent>
       </DropdownMenuPortal>

@@ -1111,6 +1111,32 @@ describe('SegmentationService', () => {
 
       expect(callback).not.toHaveBeenCalled();
     });
+
+    it('should early return if the segmentation is not found', async () => {
+      jest.spyOn(cstSegmentation.state, 'getSegmentation').mockReturnValue(undefined);
+      jest
+        .spyOn(serviceManagerMock.services.cornerstoneViewportService, 'getCornerstoneViewport')
+        // only needed interfaces for the addSegmentationRepresentation call
+        .mockReturnValue(mockCornerstoneStackViewport as unknown as csTypes.IStackViewport);
+      jest.spyOn(console, 'warn').mockReturnValue(undefined);
+      jest.spyOn(cstSegmentation, 'addSegmentationRepresentations').mockReturnValueOnce(undefined);
+
+      const callback = jest.fn();
+      service.subscribe(service.EVENTS.SEGMENTATION_REPRESENTATION_MODIFIED, callback);
+
+      await service.addSegmentationRepresentation(viewportId, {
+        segmentationId: 'missing-segmentation-id',
+        type: csToolsEnums.SegmentationRepresentations.Labelmap,
+      });
+
+      expect(console.warn).toHaveBeenCalledTimes(1);
+      expect(console.warn).toHaveBeenCalledWith(
+        'Segmentation with id missing-segmentation-id not found.'
+      );
+
+      expect(cstSegmentation.addSegmentationRepresentations).not.toHaveBeenCalled();
+      expect(callback).not.toHaveBeenCalled();
+    });
   });
 
   describe('createLabelmapForDisplaySet', () => {
