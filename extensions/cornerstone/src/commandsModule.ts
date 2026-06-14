@@ -23,6 +23,7 @@ import {
 } from '@cornerstonejs/tools/utilities/contourSegmentation/logicalOperators';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import * as labelmapInterpolation from '@cornerstonejs/labelmap-interpolation';
+import ort from 'onnxruntime-web/webgpu';
 import { ONNXSegmentationController } from '@cornerstonejs/ai';
 
 import { Types as OhifTypes, utils } from '@ohif/core';
@@ -65,6 +66,10 @@ const toggleSyncFunctions = {
 };
 
 const { segmentation: segmentationUtils } = cstUtils;
+
+const publicUrl = process.env.PUBLIC_URL || '/';
+const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
+ort.env.wasm.wasmPaths = ortWasmBasePath;
 
 const getLabelmapTools = ({ toolGroupService }) => {
   const labelmapTools = [];
