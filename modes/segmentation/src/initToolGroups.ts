@@ -12,7 +12,47 @@ const colorsByOrientation = {
   coronal: 'rgb(0, 200, 0)',
 };
 
-function createTools({ utilityModule, commandsManager }) {
+function createCrosshairsTool(toolNames, Enums, cornerstoneViewportService) {
+  return {
+    toolName: toolNames.Crosshairs,
+    bindings: [
+      {
+        mouseButton: Enums.MouseBindings.Primary,
+        modifierKey: Enums.KeyboardBindings.Shift,
+      },
+    ],
+    configuration: {
+      viewportIndicators: true,
+      viewportIndicatorsConfig: {
+        circleRadius: 5,
+        xOffset: 0.95,
+        yOffset: 0.05,
+      },
+      disableOnPassive: true,
+      getReferenceLineSlabThicknessControlsOn: () => false,
+      autoPan: {
+        enabled: false,
+        panSize: 10,
+      },
+      getReferenceLineColor: viewportId => {
+        const viewportInfo = cornerstoneViewportService.getViewportInfo(viewportId);
+        const viewportOptions = viewportInfo?.viewportOptions;
+        if (viewportOptions) {
+          return (
+            colours[viewportOptions.id] ||
+            colorsByOrientation[viewportOptions.orientation] ||
+            '#0c0'
+          );
+        } else {
+          console.warn('missing viewport?', viewportId);
+          return '#0c0';
+        }
+      },
+    },
+  };
+}
+
+function createTools({ utilityModule, commandsManager, cornerstoneViewportService }) {
   const { toolNames, Enums, fillInsideCircleWithSliceSlab } = utilityModule.exports;
 
   const tools = {
@@ -175,7 +215,11 @@ function createTools({ utilityModule, commandsManager }) {
         },
       },
     ],
-    disabled: [{ toolName: toolNames.ReferenceLines }, { toolName: toolNames.AdvancedMagnify }],
+    disabled: [
+      createCrosshairsTool(toolNames, Enums, cornerstoneViewportService),
+      { toolName: toolNames.ReferenceLines },
+      { toolName: toolNames.AdvancedMagnify },
+    ],
   };
 
   const updatedTools = commandsManager.run('initializeSegmentLabelTool', { tools });
@@ -187,7 +231,9 @@ function initDefaultToolGroup(extensionManager, toolGroupService, commandsManage
   const utilityModule = extensionManager.getModuleEntry(
     '@ohif/extension-cornerstone.utilityModule.tools'
   );
-  const tools = createTools({ commandsManager, utilityModule });
+  const servicesManager = extensionManager._servicesManager;
+  const { cornerstoneViewportService } = servicesManager.services;
+  const tools = createTools({ commandsManager, utilityModule, cornerstoneViewportService });
   toolGroupService.createToolGroupAndAddTools(toolGroupId, tools);
 }
 
@@ -197,46 +243,7 @@ function initMPRToolGroup(extensionManager, toolGroupService, commandsManager) {
   );
   const servicesManager = extensionManager._servicesManager;
   const { cornerstoneViewportService } = servicesManager.services;
-  const tools = createTools({ commandsManager, utilityModule });
-  tools.disabled.push(
-    {
-      toolName: utilityModule.exports.toolNames.Crosshairs,
-      bindings: [
-        {
-          mouseButton: utilityModule.exports.Enums.MouseBindings.Primary,
-          modifierKey: utilityModule.exports.Enums.KeyboardBindings.Shift,
-        },
-      ],
-      configuration: {
-        viewportIndicators: true,
-        viewportIndicatorsConfig: {
-          circleRadius: 5,
-          xOffset: 0.95,
-          yOffset: 0.05,
-        },
-        disableOnPassive: true,
-        autoPan: {
-          enabled: false,
-          panSize: 10,
-        },
-        getReferenceLineColor: viewportId => {
-          const viewportInfo = cornerstoneViewportService.getViewportInfo(viewportId);
-          const viewportOptions = viewportInfo?.viewportOptions;
-          if (viewportOptions) {
-            return (
-              colours[viewportOptions.id] ||
-              colorsByOrientation[viewportOptions.orientation] ||
-              '#0c0'
-            );
-          } else {
-            console.warn('missing viewport?', viewportId);
-            return '#0c0';
-          }
-        },
-      },
-    },
-    { toolName: utilityModule.exports.toolNames.ReferenceLines }
-  );
+  const tools = createTools({ commandsManager, utilityModule, cornerstoneViewportService });
   toolGroupService.createToolGroupAndAddTools('mpr', tools);
 }
 

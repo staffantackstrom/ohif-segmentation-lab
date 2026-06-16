@@ -285,12 +285,11 @@ export const toolbarButtons: Button[] = [
       commands: {
         commandName: 'toggleActiveDisabledToolbar',
         commandOptions: {
-          toolGroupIds: ['mpr'],
+          toolGroupIds: ['default', 'mpr'],
         },
       },
       evaluate: {
         name: 'evaluate.cornerstoneTool.toggleWithModifier',
-        disabledText: i18n.t('Buttons:Select an MPR viewport to enable this tool'),
         toggledOnIcon: 'tool-crosshair-checked',
         defaultIcon: 'tool-crosshair',
       },
@@ -343,7 +342,17 @@ export const toolbarButtons: Button[] = [
       label: i18n.t('Buttons:Reference Lines'),
       tooltip: i18n.t('Buttons:Show Reference Lines'),
       commands: 'toggleEnabledDisabledToolbar',
-      evaluate: 'evaluate.cornerstoneTool.toggle',
+      listeners: {
+        [ViewportGridService.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED]: callbacks('ReferenceLines'),
+        [ViewportGridService.EVENTS.VIEWPORTS_READY]: callbacks('ReferenceLines'),
+      },
+      evaluate: [
+        'evaluate.cornerstoneTool.toggle',
+        {
+          name: 'evaluate.viewport.supported',
+          unsupportedViewportTypes: ['video'],
+        },
+      ],
     },
   },
   {

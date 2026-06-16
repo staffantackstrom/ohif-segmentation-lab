@@ -47,7 +47,7 @@ import {
   SplineContourSegmentationTool,
   LabelMapEditWithContourTool,
 } from '@cornerstonejs/tools';
-import { cache, metaData, utilities as csUtils } from '@cornerstonejs/core';
+import { cache, metaData, StackViewport, utilities as csUtils } from '@cornerstonejs/core';
 import {
   LabelmapSlicePropagationTool,
   MarkerLabelmapTool,
@@ -68,6 +68,26 @@ const { triggerSegmentationDataModified } = segmentation.triggerSegmentationEven
 const { transformIndexToWorld } = csUtils;
 const EPSILON = 1e-3;
 const MARKER_OBLIQUE_SLAB_PADDING_MM = 0.25;
+
+const patchStackViewportSlabThicknessForCrosshairs = () => {
+  const prototype = StackViewport?.prototype;
+
+  if (!prototype) {
+    return;
+  }
+
+  if (!prototype.getSlabThickness) {
+    prototype.getSlabThickness = () => 0;
+  }
+
+  if (!prototype.setSlabThickness) {
+    prototype.setSlabThickness = () => {};
+  }
+
+  if (!prototype.resetSlabThickness) {
+    prototype.resetSlabThickness = () => {};
+  }
+};
 
 const forceMarkerVolumeLabelmapActorModified = preview => {
   const viewport = preview?.viewport;
@@ -402,6 +422,8 @@ ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabe
 };
 
 export default function initCornerstoneTools(configuration = {}) {
+  patchStackViewportSlabThicknessForCrosshairs();
+
   CrosshairsTool.isAnnotation = false;
   LabelmapSlicePropagationTool.isAnnotation = false;
   MarkerLabelmapTool.isAnnotation = false;
