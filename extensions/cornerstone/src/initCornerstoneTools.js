@@ -65,7 +65,7 @@ const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
 const originalOnnxInitViewport = ONNXSegmentationController.prototype.initViewport;
 const originalCreateOnnxLabelmap = ONNXSegmentationController.prototype.createLabelmap;
 const { triggerSegmentationDataModified } = segmentation.triggerSegmentationEvents;
-const { transformIndexToWorld } = csUtils;
+const { transformIndexToWorld, transformWorldToIndex } = csUtils;
 const EPSILON = 1e-3;
 const MARKER_OBLIQUE_SLAB_PADDING_MM = 0.25;
 
@@ -87,6 +87,55 @@ const patchStackViewportSlabThicknessForCrosshairs = () => {
   if (!prototype.resetSlabThickness) {
     prototype.resetSlabThickness = () => {};
   }
+};
+
+const patchRegionSegmentPlusForIsotropicLabelmaps = () => {
+  if (RegionSegmentPlusTool.prototype._ohifIsotropicLabelmapPatched) {
+    return;
+  }
+
+  RegionSegmentPlusTool.prototype._ohifIsotropicLabelmapPatched = true;
+
+  RegionSegmentPlusTool.prototype._isOrthogonalView = () => true;
+  RegionSegmentPlusTool.prototype.applyGrowCutLabelmap = function applyGrowCutLabelmapToTargetGrid(
+    segmentationId,
+    segmentIndex,
+    targetLabelmap,
+    sourceLabelmap
+  ) {
+    const targetVoxelManager = targetLabelmap.voxelManager;
+    const sourceVoxelManager = sourceLabelmap.voxelManager;
+    const targetImageData = targetLabelmap.imageData;
+    const sourceImageData = sourceLabelmap.imageData;
+    const targetDimensions = targetLabelmap.dimensions;
+    const touchedSlices = new Set();
+
+    sourceVoxelManager.forEach(({ value, pointIJK }) => {
+      if (value !== segmentIndex || !pointIJK) {
+        return;
+      }
+
+      const world = transformIndexToWorld(sourceImageData, pointIJK);
+      const targetIJK = transformWorldToIndex(targetImageData, world).map(Math.round);
+
+      if (
+        targetIJK[0] < 0 ||
+        targetIJK[1] < 0 ||
+        targetIJK[2] < 0 ||
+        targetIJK[0] >= targetDimensions[0] ||
+        targetIJK[1] >= targetDimensions[1] ||
+        targetIJK[2] >= targetDimensions[2]
+      ) {
+        return;
+      }
+
+      targetVoxelManager.setAtIJKPoint(targetIJK, segmentIndex);
+      touchedSlices.add(targetIJK[2]);
+    });
+
+    const modifiedSlices = touchedSlices.size ? Array.from(touchedSlices) : undefined;
+    triggerSegmentationDataModified(segmentationId, modifiedSlices, segmentIndex);
+  };
 };
 
 const forceMarkerVolumeLabelmapActorModified = preview => {
@@ -423,6 +472,7 @@ ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabe
 
 export default function initCornerstoneTools(configuration = {}) {
   patchStackViewportSlabThicknessForCrosshairs();
+  patchRegionSegmentPlusForIsotropicLabelmaps();
 
   CrosshairsTool.isAnnotation = false;
   LabelmapSlicePropagationTool.isAnnotation = false;

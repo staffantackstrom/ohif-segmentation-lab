@@ -492,6 +492,7 @@ class SegmentationService extends PubSubService {
   ): Promise<string> {
     const geometry = this._getIsotropicLabelmapGeometry(displaySet, spacing);
     const volumeId = `localLabelmap:${segmentationId}:${uuidv4()}`;
+    const referencedVolumeId = this._getVolumeIdForDisplaySet(displaySet);
 
     const labelmapVolume = volumeLoader.createLocalLabelmapVolume(
       {
@@ -512,6 +513,7 @@ class SegmentationService extends PubSubService {
     );
 
     labelmapVolume.referencedImageIds = geometry.referencedImageIds;
+    labelmapVolume.referencedVolumeId = referencedVolumeId;
 
     const segmentationPublicInput: cstTypes.SegmentationPublicInput = {
       segmentationId,
@@ -519,6 +521,7 @@ class SegmentationService extends PubSubService {
         type: LABELMAP,
         data: {
           volumeId,
+          referencedVolumeId,
           referencedImageIds: geometry.referencedImageIds,
         },
       },
