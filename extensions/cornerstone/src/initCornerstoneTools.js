@@ -27,6 +27,7 @@ import {
   init,
   addTool,
   annotation,
+  segmentation,
   ReferenceLinesTool,
   TrackballRotateTool,
   AdvancedMagnifyTool,
@@ -46,6 +47,7 @@ import {
   SplineContourSegmentationTool,
   LabelMapEditWithContourTool,
 } from '@cornerstonejs/tools';
+import { cache, metaData, utilities as csUtils } from '@cornerstonejs/core';
 import {
   LabelmapSlicePropagationTool,
   MarkerLabelmapTool,
@@ -62,16 +64,273 @@ const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
 const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
 const originalOnnxInitViewport = ONNXSegmentationController.prototype.initViewport;
 const originalCreateOnnxLabelmap = ONNXSegmentationController.prototype.createLabelmap;
-const originalOnnxRunDecode = ONNXSegmentationController.prototype.runDecode;
-const originalOnnxUpdateAnnotations = ONNXSegmentationController.prototype.updateAnnotations;
+const { triggerSegmentationDataModified } = segmentation.triggerSegmentationEvents;
+const { transformIndexToWorld } = csUtils;
+const EPSILON = 1e-3;
+const MARKER_OBLIQUE_SLAB_PADDING_MM = 0.25;
 
-const isMarkerDebugEnabled = () =>
-  typeof window !== 'undefined' && window.localStorage?.debugMarkerLabelmap === 'true';
+const forceMarkerVolumeLabelmapActorModified = preview => {
+  const viewport = preview?.viewport;
+  const segmentationId = preview?.segmentationId;
+  const volumeId = preview?.volumeId;
 
-const markerDebug = (...args) => {
-  if (isMarkerDebugEnabled()) {
-    console.debug('[MarkerLabelmapDebug]', ...args);
+  if (!viewport || !segmentationId || !volumeId) {
+    return { updatedVolumeLabelmapActor: false };
   }
+
+  const actors = viewport.getActors?.() || [];
+  const labelmapActors = actors.filter(
+    actorEntry =>
+      actorEntry.representationUID?.startsWith(`${segmentationId}-Labelmap`) &&
+      actorEntry.referencedId === volumeId
+  );
+
+  for (const actorEntry of labelmapActors) {
+    const actor = actorEntry.actor;
+    const mapper = actor?.getMapper?.();
+    const inputData = mapper?.getInputData?.();
+
+    inputData?.modified?.();
+    mapper?.modified?.();
+    actor?.modified?.();
+    actor?.getProperty?.()?.modified?.();
+    actor?.setVisibility?.(true);
+  }
+
+  return labelmapActors.length > 0;
+};
+
+const normalizeMarkerVector = vector => {
+  const length = Math.hypot(vector?.[0] || 0, vector?.[1] || 0, vector?.[2] || 0);
+
+  if (!Number.isFinite(length) || length < EPSILON) {
+    return null;
+  }
+
+  return [vector[0] / length, vector[1] / length, vector[2] / length];
+};
+
+const dotMarker = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+const subtractMarker = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+
+const crossMarker = (a, b) =>
+  normalizeMarkerVector([
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ]);
+
+const asMarkerNumberArray = value => {
+  if (!value) {
+    return [];
+  }
+
+  return Array.isArray(value) ? value.map(Number) : String(value).split('\\').map(Number);
+};
+
+const getMarkerDrawingPlaneInfo = viewport => {
+  const referenceData = viewport?.getImagePlaneReferenceData?.();
+  const imageId = referenceData?.referencedImageId || viewport?.getCurrentImageId?.();
+  const imagePlaneModule = imageId ? metaData.get('imagePlaneModule', imageId) : null;
+
+  return {
+    imageId,
+    imagePlaneModule,
+  };
+};
+
+const getMarkerSliceSpacingMm = viewport => {
+  const { imageId, imagePlaneModule } = getMarkerDrawingPlaneInfo(viewport);
+  const image = imageId ? cache.getImage(imageId) : null;
+  const spacingBetweenSlices =
+    Number(imagePlaneModule?.spacingBetweenSlices) || Number(image?.spacingBetweenSlices);
+  const sliceThickness = Number(imagePlaneModule?.sliceThickness) || Number(image?.sliceThickness);
+
+  if (spacingBetweenSlices > EPSILON) {
+    return spacingBetweenSlices;
+  }
+
+  if (sliceThickness > EPSILON) {
+    return sliceThickness;
+  }
+
+  return 1;
+};
+
+const expandMarkerBounds = (boundsIJK, dimensions, amount = 2) => {
+  if (!boundsIJK || !dimensions) {
+    return boundsIJK;
+  }
+
+  return boundsIJK.map(([min, max], axis) => [
+    Math.max(0, Math.floor(min - amount)),
+    Math.min(dimensions[axis] - 1, Math.ceil(max + amount)),
+  ]);
+};
+
+const createEmptyMarkerBounds = () => [
+  [Infinity, -Infinity],
+  [Infinity, -Infinity],
+  [Infinity, -Infinity],
+];
+
+const addPointToMarkerBounds = (boundsIJK, pointIJK) => {
+  for (let axis = 0; axis < 3; axis++) {
+    boundsIJK[axis][0] = Math.min(boundsIJK[axis][0], pointIJK[axis]);
+    boundsIJK[axis][1] = Math.max(boundsIJK[axis][1], pointIJK[axis]);
+  }
+};
+
+const hasValidMarkerBounds = boundsIJK =>
+  boundsIJK?.every(([min, max]) => Number.isFinite(min) && Number.isFinite(max) && min <= max);
+
+const applyMarkerMaskAsObliqueSlab = (preview, mask, canvasPosition, pCutoff) => {
+  const sourceVoxelManager = preview?.segmentationVoxelManager;
+  const targetVoxelManager = preview?.memo?.voxelManager;
+  const segmentationImageData = preview?.segmentationImageData;
+  const { origin, rightVector, downVector } = canvasPosition || {};
+
+  if (
+    !sourceVoxelManager ||
+    !targetVoxelManager ||
+    !segmentationImageData ||
+    !mask?.data ||
+    !origin ||
+    !rightVector ||
+    !downVector
+  ) {
+    return null;
+  }
+
+  const normal = crossMarker(rightVector, downVector);
+  const rightLengthSquared = dotMarker(rightVector, rightVector);
+  const downLengthSquared = dotMarker(downVector, downVector);
+
+  if (!normal || rightLengthSquared < EPSILON || downLengthSquared < EPSILON) {
+    return null;
+  }
+
+  const spacing = segmentationImageData.getSpacing?.() || [1, 1, 1];
+  const minSpacing = Math.max(Math.min(...spacing), 0.25);
+  const halfThicknessMm =
+    Math.max(getMarkerSliceSpacingMm(preview.viewport) / 2, minSpacing / 2, 0.5) +
+    MARKER_OBLIQUE_SLAB_PADDING_MM;
+  const planeOrigin = [origin[0], origin[1], origin[2]];
+  const boundsIJK = createEmptyMarkerBounds();
+  const worldPointJ = [0, 0, 0];
+  const worldPoint = [0, 0, 0];
+
+  for (let j = 0; j < mask.height; j++) {
+    worldPointJ[0] = origin[0] + downVector[0] * j;
+    worldPointJ[1] = origin[1] + downVector[1] * j;
+    worldPointJ[2] = origin[2] + downVector[2] * j;
+
+    for (let i = 0; i < mask.width; i++) {
+      const maskIndex = 4 * (i + j * mask.width);
+
+      if (mask.data[maskIndex] <= pCutoff) {
+        continue;
+      }
+
+      worldPoint[0] = worldPointJ[0] + rightVector[0] * i;
+      worldPoint[1] = worldPointJ[1] + rightVector[1] * i;
+      worldPoint[2] = worldPointJ[2] + rightVector[2] * i;
+
+      const ijkPoint = segmentationImageData.worldToIndex(worldPoint).map(Math.round);
+
+      if (ijkPoint.findIndex((value, axis) => value < 0 || value >= sourceVoxelManager.dimensions[axis]) !== -1) {
+        continue;
+      }
+
+      addPointToMarkerBounds(boundsIJK, ijkPoint);
+    }
+  }
+
+  if (!hasValidMarkerBounds(boundsIJK)) {
+    return null;
+  }
+
+  const expandedBoundsIJK = expandMarkerBounds(
+    boundsIJK,
+    sourceVoxelManager.dimensions,
+    Math.ceil(halfThicknessMm / minSpacing) + 2
+  );
+  const changedSlices = new Set();
+
+  sourceVoxelManager.forEach(
+    ({ index, pointIJK, pointLPS }) => {
+      const world = pointLPS || transformIndexToWorld(segmentationImageData, pointIJK);
+      const delta = subtractMarker(world, planeOrigin);
+      const signedPlaneDistance = dotMarker(delta, normal);
+      const existingValue = sourceVoxelManager.getAtIndex(index);
+
+      if (existingValue === preview.previewSegmentIndex) {
+        targetVoxelManager.setAtIJKPoint(pointIJK, null);
+      }
+
+      if (Math.abs(signedPlaneDistance) > halfThicknessMm + EPSILON) {
+        return;
+      }
+
+      const projected = [
+        world[0] - normal[0] * signedPlaneDistance,
+        world[1] - normal[1] * signedPlaneDistance,
+        world[2] - normal[2] * signedPlaneDistance,
+      ];
+      const projectedDelta = subtractMarker(projected, planeOrigin);
+      const maskX = Math.round(dotMarker(projectedDelta, rightVector) / rightLengthSquared);
+      const maskY = Math.round(dotMarker(projectedDelta, downVector) / downLengthSquared);
+
+      if (maskX < 0 || maskX >= mask.width || maskY < 0 || maskY >= mask.height) {
+        return;
+      }
+
+      const maskIndex = 4 * (maskX + maskY * mask.width);
+
+      if (mask.data[maskIndex] <= pCutoff) {
+        return;
+      }
+
+      targetVoxelManager.setAtIJKPoint(pointIJK, preview.previewSegmentIndex);
+      changedSlices.add(pointIJK[2]);
+    },
+    {
+      imageData: segmentationImageData,
+      boundsIJK: expandedBoundsIJK,
+    }
+  );
+
+  return {
+    changedSlices: Array.from(changedSlices),
+  };
+};
+
+const markMarkerLabelmapImageDataModified = (preview, modifiedSlices) => {
+  preview?.segmentationImageData?.modified?.();
+
+  const volumeId = preview?.volumeId;
+  const segmentationVolume = volumeId ? cache.getVolume(volumeId) : null;
+
+  if (!segmentationVolume) {
+    return;
+  }
+
+  const dimensions = segmentationVolume.imageData?.getDimensions?.();
+  const numberOfSlices = dimensions?.[2] || segmentationVolume.dimensions?.[2] || 0;
+
+  if (segmentationVolume.invalidate) {
+    segmentationVolume.invalidate();
+  } else {
+    for (let sliceIndex = 0; sliceIndex < numberOfSlices; sliceIndex++) {
+      segmentationVolume.vtkOpenGLTexture?.setUpdatedFrame?.(sliceIndex);
+    }
+
+    segmentationVolume.imageData?.modified?.();
+    segmentationVolume.vtkOpenGLTexture?.modified?.();
+  }
+
+  segmentationVolume.modified?.();
 };
 
 ONNXSegmentationController.prototype.getConfig = function patchedGetConfig(modelName) {
@@ -102,55 +361,6 @@ ONNXSegmentationController.prototype.initViewport = function patchedInitViewport
 
     return annotations;
   };
-
-  markerDebug('initViewport', {
-    reused: isSameViewport && !!this.tool,
-    viewportId: viewport.id,
-    imageId: this.desiredImage?.imageId,
-  });
-};
-
-ONNXSegmentationController.prototype.updateAnnotations = function patchedUpdateAnnotations(...args) {
-  if (isMarkerDebugEnabled()) {
-    const annotations = this.getPromptAnnotations();
-    markerDebug('updateAnnotations before', {
-      enabled: this._enabled,
-      autoSegmentMode: this._autoSegmentMode,
-      annotationsNeedUpdating: this.annotationsNeedUpdating,
-      annotationCount: annotations.length,
-      annotationTools: annotations.map(annotation => annotation.metadata?.toolName),
-      hasCurrentImage: !!this.currentImage,
-      hasCanvasPosition: !!this.currentImage?.canvasPosition,
-      hasImageEmbeddings: !!this.currentImage?.imageEmbeddings,
-      isGpuInUse: this.isGpuInUse,
-      desiredImageId: this.desiredImage?.imageId,
-      currentImageId: this.currentImage?.imageId,
-    });
-  }
-
-  const result = originalOnnxUpdateAnnotations.apply(this, args);
-
-  markerDebug('updateAnnotations after', {
-    points: this.points?.length ? [...this.points] : [],
-    labels: this.labels?.length ? [...this.labels] : [],
-    worldPointCount: this.worldPoints?.length ?? 0,
-  });
-
-  return result;
-};
-
-ONNXSegmentationController.prototype.runDecode = function patchedRunDecode(...args) {
-  markerDebug('runDecode', {
-    skippedByGpu: this.isGpuInUse,
-    hasCurrentImage: !!this.currentImage,
-    hasImageEmbeddings: !!this.currentImage?.imageEmbeddings,
-    pointCount: (this.points?.length ?? 0) / 2,
-    labels: this.labels?.length ? [...this.labels] : [],
-    desiredImageId: this.desiredImage?.imageId,
-    currentImageId: this.currentImage?.imageId,
-  });
-
-  return originalOnnxRunDecode.apply(this, args);
 };
 
 ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabelmap(...args) {
@@ -158,52 +368,32 @@ ONNXSegmentationController.prototype.createLabelmap = function patchedCreateLabe
   const previousIslandFillOptions = this.islandFillOptions;
   const [mask] = args;
 
-  if (isMarkerDebugEnabled()) {
-    const data = mask?.data || [];
-    let max = 0;
-    let nonZero = 0;
-    let aboveCutoff = 0;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const value = data[i];
-      if (value > 0) {
-        nonZero++;
-      }
-      if (value > this.pCutoff) {
-        aboveCutoff++;
-      }
-      if (value > max) {
-        max = value;
-      }
-    }
-
-    markerDebug('createLabelmap before', {
-      maskWidth: mask?.width,
-      maskHeight: mask?.height,
-      pCutoff: this.pCutoff,
-      maskMax: max,
-      maskNonZeroPixels: nonZero,
-      maskPixelsAboveCutoff: aboveCutoff,
-      hasTool: !!this.tool,
-      viewportId: this.viewport?.id,
-    });
-  }
-
   this._autoSegmentMode = false;
   this.islandFillOptions = null;
 
   try {
     const result = originalCreateOnnxLabelmap.apply(this, args);
-    const hasPreview = !!this.tool?._previewData?.preview;
+    const preview = this.tool?._previewData?.preview;
+    const hasPreview = !!preview;
+    const modifiedSlices = preview?.memo?.voxelManager?.getArrayOfModifiedSlices?.() || [];
 
     if (hasPreview) {
+      const obliqueSlabResult = applyMarkerMaskAsObliqueSlab(preview, mask, args[1], this.pCutoff);
+      modifiedSlices.splice(
+        0,
+        modifiedSlices.length,
+        ...(obliqueSlabResult?.changedSlices || modifiedSlices)
+      );
       this.tool.acceptPreview(this.viewport.element);
-    }
+      markMarkerLabelmapImageDataModified(preview, modifiedSlices);
+      forceMarkerVolumeLabelmapActorModified(preview);
 
-    markerDebug('createLabelmap after', {
-      acceptedPreview: hasPreview,
-      hasPreviewAfterAccept: !!this.tool?._previewData?.preview,
-    });
+      if (modifiedSlices?.length) {
+        triggerSegmentationDataModified(preview.segmentationId, modifiedSlices, preview.segmentIndex);
+      }
+
+      this.viewport.render?.();
+    }
     return result;
   } finally {
     this._autoSegmentMode = previousAutoSegmentMode;
