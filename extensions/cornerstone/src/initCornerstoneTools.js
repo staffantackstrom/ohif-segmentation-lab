@@ -47,7 +47,13 @@ import {
   SplineContourSegmentationTool,
   LabelMapEditWithContourTool,
 } from '@cornerstonejs/tools';
-import { cache, metaData, StackViewport, utilities as csUtils } from '@cornerstonejs/core';
+import {
+  cache,
+  getEnabledElement,
+  metaData,
+  StackViewport,
+  utilities as csUtils,
+} from '@cornerstonejs/core';
 import {
   LabelmapSlicePropagationTool,
   MarkerLabelmapTool,
@@ -64,6 +70,9 @@ const ortWasmBasePath = `${publicUrl.replace(/\/?$/, '/')}ort/`;
 const originalGetOnnxConfig = ONNXSegmentationController.prototype.getConfig;
 const originalOnnxInitViewport = ONNXSegmentationController.prototype.initViewport;
 const originalCreateOnnxLabelmap = ONNXSegmentationController.prototype.createLabelmap;
+const originalRegionSegmentPlusOnMouseStable = RegionSegmentPlusTool.prototype.onMouseStable;
+const originalRegionSegmentPlusPreMouseDown =
+  RegionSegmentPlusTool.prototype.preMouseDownCallback;
 const { triggerSegmentationDataModified } = segmentation.triggerSegmentationEvents;
 const { transformIndexToWorld, transformWorldToIndex } = csUtils;
 const EPSILON = 1e-3;
@@ -89,6 +98,68 @@ const patchStackViewportSlabThicknessForCrosshairs = () => {
   }
 };
 
+const subtractWorld = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+
+const addWorld = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+
+const scaleWorld = (vector, scale) => [
+  vector[0] * scale,
+  vector[1] * scale,
+  vector[2] * scale,
+];
+
+const getWorldLength = vector => Math.hypot(vector[0], vector[1], vector[2]);
+
+const normalizeWorld = vector => {
+  const length = getWorldLength(vector);
+  return length > EPSILON ? scaleWorld(vector, 1 / length) : [0, 0, 0];
+};
+
+const dotWorld = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+const getVolumeAxisInfo = imageData => {
+  const origin = transformIndexToWorld(imageData, [0, 0, 0]);
+
+  return [
+    transformIndexToWorld(imageData, [1, 0, 0]),
+    transformIndexToWorld(imageData, [0, 1, 0]),
+    transformIndexToWorld(imageData, [0, 0, 1]),
+  ].map(axisPoint => {
+    const stepVector = subtractWorld(axisPoint, origin);
+    return {
+      vector: normalizeWorld(stepVector),
+      spacing: getWorldLength(stepVector),
+    };
+  });
+};
+
+const getExpandedBoundsForSourceVoxel = (targetImageData, centerWorld, halfVectors) => {
+  const bounds = [
+    [Infinity, -Infinity],
+    [Infinity, -Infinity],
+    [Infinity, -Infinity],
+  ];
+
+  for (const xSign of [-1, 1]) {
+    for (const ySign of [-1, 1]) {
+      for (const zSign of [-1, 1]) {
+        const cornerWorld = addWorld(
+          addWorld(addWorld(centerWorld, scaleWorld(halfVectors[0], xSign)), scaleWorld(halfVectors[1], ySign)),
+          scaleWorld(halfVectors[2], zSign)
+        );
+        const cornerIJK = transformWorldToIndex(targetImageData, cornerWorld);
+
+        for (let axis = 0; axis < 3; axis++) {
+          bounds[axis][0] = Math.min(bounds[axis][0], cornerIJK[axis] - 1);
+          bounds[axis][1] = Math.max(bounds[axis][1], cornerIJK[axis] + 1);
+        }
+      }
+    }
+  }
+
+  return bounds;
+};
+
 const patchRegionSegmentPlusForIsotropicLabelmaps = () => {
   if (RegionSegmentPlusTool.prototype._ohifIsotropicLabelmapPatched) {
     return;
@@ -97,6 +168,37 @@ const patchRegionSegmentPlusForIsotropicLabelmaps = () => {
   RegionSegmentPlusTool.prototype._ohifIsotropicLabelmapPatched = true;
 
   RegionSegmentPlusTool.prototype._isOrthogonalView = () => true;
+  RegionSegmentPlusTool.prototype.onMouseStable = async function patchedOnMouseStable(
+    evt,
+    worldPoint,
+    element
+  ) {
+    await originalRegionSegmentPlusOnMouseStable.call(this, evt, worldPoint, element);
+
+    if (this.allowedToProceed || !this.growCutData?.segmentation?.referencedVolumeId) {
+      return;
+    }
+
+    this.allowedToProceed = true;
+
+    if (element) {
+      element.style.cursor = 'copy';
+      requestAnimationFrame(() => {
+        if (element.style.cursor !== 'copy') {
+          element.style.cursor = 'copy';
+        }
+      });
+    }
+
+    const enabledElement = getEnabledElement(element);
+    enabledElement?.viewport?.render();
+  };
+  RegionSegmentPlusTool.prototype.preMouseDownCallback = function patchedPreMouseDownCallback(
+    ...args
+  ) {
+    this.allowedToProceed = true;
+    return originalRegionSegmentPlusPreMouseDown.apply(this, args);
+  };
   RegionSegmentPlusTool.prototype.applyGrowCutLabelmap = function applyGrowCutLabelmapToTargetGrid(
     segmentationId,
     segmentIndex,
@@ -108,6 +210,11 @@ const patchRegionSegmentPlusForIsotropicLabelmaps = () => {
     const targetImageData = targetLabelmap.imageData;
     const sourceImageData = sourceLabelmap.imageData;
     const targetDimensions = targetLabelmap.dimensions;
+    const sourceAxes = getVolumeAxisInfo(sourceImageData);
+    const targetAxes = getVolumeAxisInfo(targetImageData);
+    const targetPaddingMm = Math.max(...targetAxes.map(axis => axis.spacing)) * 0.55;
+    const halfVectors = sourceAxes.map(axis => scaleWorld(axis.vector, axis.spacing / 2));
+    const halfWidths = sourceAxes.map(axis => axis.spacing / 2 + targetPaddingMm);
     const touchedSlices = new Set();
 
     sourceVoxelManager.forEach(({ value, pointIJK }) => {
@@ -115,22 +222,43 @@ const patchRegionSegmentPlusForIsotropicLabelmaps = () => {
         return;
       }
 
-      const world = transformIndexToWorld(sourceImageData, pointIJK);
-      const targetIJK = transformWorldToIndex(targetImageData, world).map(Math.round);
+      const centerWorld = transformIndexToWorld(sourceImageData, pointIJK);
+      const targetBounds = getExpandedBoundsForSourceVoxel(
+        targetImageData,
+        centerWorld,
+        halfVectors
+      );
 
-      if (
-        targetIJK[0] < 0 ||
-        targetIJK[1] < 0 ||
-        targetIJK[2] < 0 ||
-        targetIJK[0] >= targetDimensions[0] ||
-        targetIJK[1] >= targetDimensions[1] ||
-        targetIJK[2] >= targetDimensions[2]
-      ) {
+      const iMin = Math.max(0, Math.floor(targetBounds[0][0]));
+      const iMax = Math.min(targetDimensions[0] - 1, Math.ceil(targetBounds[0][1]));
+      const jMin = Math.max(0, Math.floor(targetBounds[1][0]));
+      const jMax = Math.min(targetDimensions[1] - 1, Math.ceil(targetBounds[1][1]));
+      const kMin = Math.max(0, Math.floor(targetBounds[2][0]));
+      const kMax = Math.min(targetDimensions[2] - 1, Math.ceil(targetBounds[2][1]));
+
+      if (iMin > iMax || jMin > jMax || kMin > kMax) {
         return;
       }
 
-      targetVoxelManager.setAtIJKPoint(targetIJK, segmentIndex);
-      touchedSlices.add(targetIJK[2]);
+      for (let k = kMin; k <= kMax; k++) {
+        for (let j = jMin; j <= jMax; j++) {
+          for (let i = iMin; i <= iMax; i++) {
+            const targetIJK = [i, j, k];
+            const targetWorld = transformIndexToWorld(targetImageData, targetIJK);
+            const offset = subtractWorld(targetWorld, centerWorld);
+            const isInsideSourceVoxel = sourceAxes.every(
+              (axis, axisIndex) => Math.abs(dotWorld(offset, axis.vector)) <= halfWidths[axisIndex]
+            );
+
+            if (!isInsideSourceVoxel) {
+              continue;
+            }
+
+            targetVoxelManager.setAtIJKPoint(targetIJK, segmentIndex);
+            touchedSlices.add(k);
+          }
+        }
+      }
     });
 
     const modifiedSlices = touchedSlices.size ? Array.from(touchedSlices) : undefined;
